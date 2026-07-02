@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<!-- We intentionally leave this blank because android bluetooth permissions are
+     complicated and always changing. By leaving this blank, users can set exactly the
+     permissions they want, without having to 'undo' the permissions we set here -->
+</manifest>
