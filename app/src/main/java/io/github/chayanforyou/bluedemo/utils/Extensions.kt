@@ -5,6 +5,6 @@ import android.os.Build
 import android.os.Parcelable
 
 inline fun <reified T : Parcelable> Intent.parcelable(key: String): T? = when {
-    Build.VERSION.SDK_INT >= 33 -> getParcelableExtra(key, T::class.java)
+    Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> getParcelableExtra(key, T::class.java)
     else -> @Suppress("DEPRECATION") getParcelableExtra(key) as? T
 }

@@ -1,33 +1,21 @@
 package io.github.chayanforyou.bluedemo.ui.screens.device
 
-import io.github.chayanforyou.bluedemo.utils.PermissionHelper
-
-import android.Manifest
 import android.annotation.SuppressLint
-import android.app.Activity
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
 import android.content.Context
-import android.content.IntentSender
-import android.content.pm.PackageManager
-import android.location.LocationManager
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.widget.Toast
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.IntentSenderRequest
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.ui.graphics.Color
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -37,20 +25,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import androidx.core.app.ActivityCompat
-import com.google.android.gms.common.api.ResolvableApiException
-import com.google.android.gms.location.LocationRequest
-import com.google.android.gms.location.LocationRequest.Builder.IMPLICIT_MIN_UPDATE_INTERVAL
-import com.google.android.gms.location.LocationServices
-import com.google.android.gms.location.LocationSettingsRequest
-import com.google.android.gms.location.LocationSettingsResponse
-import com.google.android.gms.location.Priority
-import com.google.android.gms.location.SettingsClient
-import com.google.android.gms.tasks.Task
 import io.github.chayanforyou.bluedemo.data.Device
 import io.github.chayanforyou.bluedemo.data.DeviceType
+import io.github.chayanforyou.bluedemo.utils.PermissionHelper
 
 @SuppressLint("MissingPermission")
 @Composable
@@ -61,8 +41,7 @@ fun BluetoothLEContent(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    val bluetoothManager =
-        remember { context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager }
+    val bluetoothManager = remember { context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager }
     val bluetoothAdapter = remember { bluetoothManager?.adapter }
     val bluetoothLeScanner = remember { bluetoothAdapter?.bluetoothLeScanner }
 
@@ -121,55 +100,11 @@ fun BluetoothLEContent(
         }
     }
 
-    val resolutionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartIntentSenderForResult()
-    ) { result ->
-        if (result.resultCode == Activity.RESULT_OK) {
-            startScan()
-        }
-    }
-
-    val requestLocationPermissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission()
-    ) { isGranted ->
-        if (isGranted) {
-            val locationManager =
-                context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
-            if (!locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
-                turnOnGPS(context, resolutionLauncher) {
-                    startScan()
-                }
-            } else {
-                startScan()
-            }
-        }
-    }
-
     val triggerScan = {
         if (bluetoothAdapter == null || bluetoothLeScanner == null) {
             Toast.makeText(context, "Bluetooth LE not supported", Toast.LENGTH_SHORT).show()
         } else {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                val hasLocation = ActivityCompat.checkSelfPermission(
-                    context,
-                    Manifest.permission.ACCESS_FINE_LOCATION
-                ) == PackageManager.PERMISSION_GRANTED
-                if (hasLocation) {
-                    val locationManager =
-                        context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
-                    if (!locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
-                        turnOnGPS(context, resolutionLauncher) {
-                            startScan()
-                        }
-                    } else {
-                        startScan()
-                    }
-                } else {
-                    requestLocationPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
-                }
-            } else {
-                startScan()
-            }
+            startScan()
         }
     }
 
@@ -229,34 +164,6 @@ private fun loadBondedLeDevices(
             val isDuplicate = list.any { it.address == device.address }
             if (!isDuplicate) {
                 list.add(device)
-            }
-        }
-    }
-}
-
-private fun turnOnGPS(
-    context: Context,
-    resolutionLauncher: androidx.activity.result.ActivityResultLauncher<IntentSenderRequest>,
-    onGpsEnabled: () -> Unit
-) {
-    val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 10000).apply {
-        setWaitForAccurateLocation(false)
-        setMinUpdateIntervalMillis(IMPLICIT_MIN_UPDATE_INTERVAL)
-        setMaxUpdateDelayMillis(100000)
-    }.build()
-
-    val builder = LocationSettingsRequest.Builder().addLocationRequest(request)
-    val client: SettingsClient = LocationServices.getSettingsClient(context)
-    val task: Task<LocationSettingsResponse> = client.checkLocationSettings(builder.build())
-    task.addOnSuccessListener {
-        onGpsEnabled()
-    }
-    task.addOnFailureListener { exception ->
-        if (exception is ResolvableApiException) {
-            try {
-                val intentSenderRequest = IntentSenderRequest.Builder(exception.resolution).build()
-                resolutionLauncher.launch(intentSenderRequest)
-            } catch (_: IntentSender.SendIntentException) {
             }
         }
     }
