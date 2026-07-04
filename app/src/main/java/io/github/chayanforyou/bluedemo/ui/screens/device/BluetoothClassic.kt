@@ -1,10 +1,5 @@
 package io.github.chayanforyou.bluedemo.ui.screens.device
 
-import io.github.chayanforyou.bluedemo.data.Device
-import io.github.chayanforyou.bluedemo.data.DeviceType
-import io.github.chayanforyou.bluedemo.utils.PermissionHelper
-import androidx.compose.ui.graphics.Color
-
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
@@ -29,9 +24,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import androidx.core.app.ActivityCompat
+import io.github.chayanforyou.bluedemo.data.Device
+import io.github.chayanforyou.bluedemo.data.DeviceType
+import io.github.chayanforyou.bluedemo.utils.PermissionHelper
 import io.github.chayanforyou.bluedemo.utils.parcelable
 
 @SuppressLint("MissingPermission")

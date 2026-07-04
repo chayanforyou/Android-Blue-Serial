@@ -13,97 +13,42 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.os.Build
-import android.util.Log
 import java.io.IOException
 import java.util.UUID
 
 @SuppressLint("MissingPermission")
 internal class SerialSocket(
     private val context: Context,
-    private var device: BluetoothDevice?
+    private var device: BluetoothDevice?,
+    private val customServiceUuid: UUID? = null
 ) : BluetoothGattCallback() {
 
     companion object {
         private val BLUETOOTH_LE_CCCD = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
-        private val BLUETOOTH_LE_CC254X_SERVICE = UUID.fromString("0000ffe0-0000-1000-8000-00805f9b34fb")
-        private val BLUETOOTH_LE_CC254X_CHAR_RW = UUID.fromString("0000ffe1-0000-1000-8000-00805f9b34fb")
-        private val BLUETOOTH_LE_NRF_SERVICE = UUID.fromString("6e400001-b5a3-f393-e0a9-e50e24dcca9e")
-        private val BLUETOOTH_LE_NRF_CHAR_RW2 = UUID.fromString("6e400002-b5a3-f393-e0a9-e50e24dcca9e")
-        private val BLUETOOTH_LE_NRF_CHAR_RW3 = UUID.fromString("6e400003-b5a3-f393-e0a9-e50e24dcca9e")
-        private val BLUETOOTH_LE_MICROCHIP_SERVICE = UUID.fromString("49535343-FE7D-4AE5-8FA9-9FAFD205E455")
-        private val BLUETOOTH_LE_MICROCHIP_CHAR_RW = UUID.fromString("49535343-1E4D-4BD9-BA61-23C647249616")
-        private val BLUETOOTH_LE_MICROCHIP_CHAR_W = UUID.fromString("49535343-8841-43F4-A8D4-ECBE34729BB3")
-        private val BLUETOOTH_LE_ESP32_SERVICE = UUID.fromString("4fafc201-1fb5-459e-8fcc-c5c9c331914b")
-        private val BLUETOOTH_LE_ESP32_CHAR_RW = UUID.fromString("beb5483e-36e1-4688-b7f5-ea07361b26a8")
-
-        private val BLUETOOTH_LE_TIO_SERVICE = UUID.fromString("0000FEFB-0000-1000-8000-00805F9B34FB")
-        private val BLUETOOTH_LE_TIO_CHAR_TX = UUID.fromString("00000001-0000-1000-8000-008025000000")
-        private val BLUETOOTH_LE_TIO_CHAR_RX = UUID.fromString("00000002-0000-1000-8000-008025000000")
-        private val BLUETOOTH_LE_TIO_CHAR_TX_CREDITS = UUID.fromString("00000003-0000-1000-8000-008025000000")
-        private val BLUETOOTH_LE_TIO_CHAR_RX_CREDITS = UUID.fromString("00000004-0000-1000-8000-008025000000")
-
+        private val EXCLUDED_SERVICE_PREFIXES = setOf(
+            "00001800", // Generic Access
+            "00001801", // Generic Attribute
+            "0000180a", // Device Information
+            "0000180f"  // Battery Service
+        )
         private const val MAX_MTU = 512
         private const val DEFAULT_MTU = 23
-        private const val TAG = "SerialSocket"
     }
 
-    private open class DeviceDelegate {
-        open fun connectCharacteristics(s: BluetoothGattService): Boolean {
-            return true
-        }
-
-        open fun onDescriptorWrite(g: BluetoothGatt, d: BluetoothGattDescriptor, status: Int) { /*nop*/ }
-        open fun onCharacteristicChanged(g: BluetoothGatt, c: BluetoothGattCharacteristic) { /*nop*/ }
-        open fun onCharacteristicWrite(g: BluetoothGatt, c: BluetoothGattCharacteristic, status: Int) { /*nop*/ }
-        open fun canWrite(): Boolean {
-            return true
-        }
-        open fun disconnect() { /*nop*/ }
-    }
-
-    private val writeBuffer = ArrayList<ByteArray>()
-    private val pairingIntentFilter = IntentFilter().apply {
-        addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
-        addAction(BluetoothDevice.ACTION_PAIRING_REQUEST)
-    }
-    private val pairingBroadcastReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) {
-            onPairingBroadcastReceive(intent)
-        }
-    }
     private var listener: SerialListener? = null
-    private var delegate: DeviceDelegate? = null
     private var gatt: BluetoothGatt? = null
     private var readCharacteristic: BluetoothGattCharacteristic? = null
     private var writeCharacteristic: BluetoothGattCharacteristic? = null
+    private val writeBuffer = ArrayList<ByteArray>()
 
     private var writePending = false
     private var canceled = false
     private var connected = false
     private var payloadSize = DEFAULT_MTU - 3
 
-    internal fun disconnect() {
-        Log.d(TAG, "disconnect")
-        listener = null // ignore remaining data and errors
-        device = null
-        canceled = true
-        synchronized(writeBuffer) {
-            writePending = false
-            writeBuffer.clear()
-        }
-        readCharacteristic = null
-        writeCharacteristic = null
-        delegate?.disconnect()
-        gatt?.let {
-            Log.d(TAG, "gatt.disconnect")
-            it.disconnect()
-            Log.d(TAG, "gatt.close")
-            runCatching { it.close() }
-            gatt = null
-            connected = false
-        }
-        runCatching {
-            context.unregisterReceiver(pairingBroadcastReceiver)
+    private val pairingBroadcastReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            onPairingBroadcastReceive(intent)
         }
     }
 
@@ -114,19 +59,81 @@ internal class SerialSocket(
         }
         canceled = false
         this.listener = listener
-        Log.d(TAG, "connect $device")
-        context.registerReceiver(pairingBroadcastReceiver, pairingIntentFilter)
+        context.registerReceiver(
+            pairingBroadcastReceiver,
+            IntentFilter().apply {
+                addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
+                addAction(BluetoothDevice.ACTION_PAIRING_REQUEST)
+            }
+        )
 
         val dev = device ?: throw IOException("device is null")
-        gatt = if (Build.VERSION.SDK_INT < 23) {
-            Log.d(TAG, "connectGatt")
+        gatt = if (Build.VERSION.SDK_INT < 23) {    // Android 6.0 (October 2015)
             dev.connectGatt(context, false, this)
         } else {
-            Log.d(TAG, "connectGatt,LE")
             dev.connectGatt(context, false, this, BluetoothDevice.TRANSPORT_LE)
         }
         if (gatt == null) {
             throw IOException("connectGatt failed")
+        }
+    }
+
+    @Throws(IOException::class)
+    internal fun write(data: ByteArray) {
+        if (canceled || !connected || writeCharacteristic == null) {
+            throw IOException("not connected")
+        }
+
+        val writeChar = writeCharacteristic
+            ?: throw IOException("write characteristic is null")
+
+        var writeNow = false
+        val dataToWrite = if (data.size <= payloadSize) data else data.copyOfRange(0, payloadSize)
+
+        synchronized(writeBuffer) {
+            if (!writePending && writeBuffer.isEmpty()) {
+                writePending = true
+                writeNow = true
+            } else {
+                writeBuffer.add(dataToWrite)
+            }
+
+            if (data.size > payloadSize) {
+                for (i in 1 until (data.size + payloadSize - 1) / payloadSize) {
+                    val from = i * payloadSize
+                    val to = minOf(from + payloadSize, data.size)
+                    writeBuffer.add(data.copyOfRange(from, to))
+                }
+            }
+        }
+
+        if (writeNow) {
+            writeChar.value = dataToWrite
+            val activeGatt = gatt ?: throw IOException("gatt is null")
+            if (!activeGatt.writeCharacteristic(writeChar)) {
+                onSerialIoError(IOException("write failed"))
+            }
+        }
+    }
+
+    internal fun disconnect() {
+        listener = null // ignore remaining data and errors
+        device = null
+        canceled = true
+        synchronized(writeBuffer) {
+            writePending = false
+            writeBuffer.clear()
+        }
+        readCharacteristic = null
+        writeCharacteristic = null
+        gatt?.let {
+            it.disconnect()
+            runCatching { it.close() }
+            gatt = null
+            connected = false
+        }
+        runCatching {
+            context.unregisterReceiver(pairingBroadcastReceiver)
         }
     }
 
@@ -139,26 +146,13 @@ internal class SerialSocket(
         }
         if (dev == null || dev != this.device) return
 
-        when (intent.action) {
-            BluetoothDevice.ACTION_PAIRING_REQUEST -> {
-                val pairingVariant = intent.getIntExtra(BluetoothDevice.EXTRA_PAIRING_VARIANT, -1)
-                Log.d(TAG, "pairing request $pairingVariant")
-                onSerialConnectError(IOException("Pairing requested: pair and connect again"))
-            }
-            BluetoothDevice.ACTION_BOND_STATE_CHANGED -> {
-                val bondState = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, -1)
-                val previousBondState = intent.getIntExtra(BluetoothDevice.EXTRA_PREVIOUS_BOND_STATE, -1)
-                Log.d(TAG, "bond state $previousBondState->$bondState")
-            }
-            else -> {
-                Log.d(TAG, "unknown broadcast ${intent.action}")
-            }
+        if (intent.action == BluetoothDevice.ACTION_PAIRING_REQUEST) {
+            onSerialConnectError(IOException("Pairing requested: pair and connect again"))
         }
     }
 
     override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
         if (newState == BluetoothProfile.STATE_CONNECTED) {
-            Log.d(TAG, "connect status $status, discoverServices")
             if (!gatt.discoverServices()) {
                 onSerialConnectError(IOException("discoverServices failed"))
             }
@@ -168,124 +162,114 @@ internal class SerialSocket(
             } else {
                 onSerialConnectError(IOException("gatt status $status"))
             }
-        } else {
-            Log.d(TAG, "unknown connect state $newState $status")
         }
     }
 
     override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
-        Log.d(TAG, "servicesDiscovered, status $status")
         if (canceled) return
-        connectCharacteristics1(gatt)
-    }
-
-    private fun connectCharacteristics1(gatt: BluetoothGatt) {
-        var sync = true
         writePending = false
-        for (gattService in gatt.services) {
-            when (gattService.uuid) {
-                BLUETOOTH_LE_CC254X_SERVICE -> delegate = Cc245XDelegate()
-                BLUETOOTH_LE_MICROCHIP_SERVICE -> delegate = MicrochipDelegate()
-                BLUETOOTH_LE_NRF_SERVICE -> delegate = NrfDelegate()
-                BLUETOOTH_LE_TIO_SERVICE -> delegate = TelitDelegate()
-                BLUETOOTH_LE_ESP32_SERVICE -> delegate = ESP32Delegate()
+        if (customServiceUuid != null) {
+            val gattService = gatt.getService(customServiceUuid)
+            if (gattService != null) {
+                discoverCharacteristics(gattService)
             }
+        } else {
+            // Search for any service (excluding common non-serial ones) that can act as a serial connection
+            for (gattService in gatt.services) {
+                val serviceUuidStr = gattService.uuid.toString().lowercase()
+                if (serviceUuidStr.take(8) in EXCLUDED_SERVICE_PREFIXES) continue
 
-            if (delegate != null) {
-                sync = delegate!!.connectCharacteristics(gattService)
-                break
+                discoverCharacteristics(gattService)
+                if (readCharacteristic != null && writeCharacteristic != null) break
+                readCharacteristic = null
+                writeCharacteristic = null
             }
         }
+
         if (canceled) return
-        if (delegate == null || readCharacteristic == null || writeCharacteristic == null) {
-            for (gattService in gatt.services) {
-                Log.d(TAG, "service ${gattService.uuid}")
-                for (characteristic in gattService.characteristics) {
-                    Log.d(TAG, "characteristic ${characteristic.uuid}")
-                }
-            }
+        if (readCharacteristic == null || writeCharacteristic == null) {
             onSerialConnectError(IOException("no serial profile found"))
             return
         }
-        if (sync) {
-            connectCharacteristics2(gatt)
+
+        if (!gatt.requestMtu(MAX_MTU)) {
+            onSerialConnectError(IOException("request MTU failed"))
         }
     }
 
-    private fun connectCharacteristics2(gatt: BluetoothGatt) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            Log.d(TAG, "request max MTU")
-            if (!gatt.requestMtu(MAX_MTU)) {
-                onSerialConnectError(IOException("request MTU failed"))
+    private fun discoverCharacteristics(service: BluetoothGattService) {
+        var autoWrite: BluetoothGattCharacteristic? = null
+        var autoRead: BluetoothGattCharacteristic? = null
+
+        for (char in service.characteristics) {
+            val props = char.properties
+            val isWritable = (props and (BluetoothGattCharacteristic.PROPERTY_WRITE or
+                    BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE)) != 0
+            val isReadable = (props and (BluetoothGattCharacteristic.PROPERTY_NOTIFY or
+                    BluetoothGattCharacteristic.PROPERTY_INDICATE)) != 0
+
+            if (isWritable && isReadable) {
+                // Combined characteristic — use for both directions and stop searching
+                writeCharacteristic = char
+                readCharacteristic = char
+                return
             }
-        } else {
-            connectCharacteristics3(gatt)
+            if (isWritable && autoWrite == null) autoWrite = char
+            if (isReadable && autoRead == null) autoRead = char
+            if (autoWrite != null && autoRead != null) break
         }
+
+        writeCharacteristic = autoWrite
+        readCharacteristic = autoRead
     }
 
     override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
-        Log.d(TAG, "mtu size $mtu, status=$status")
         if (status == BluetoothGatt.GATT_SUCCESS) {
             payloadSize = mtu - 3
-            Log.d(TAG, "payload size $payloadSize")
         }
-        connectCharacteristics3(gatt)
-    }
 
-    private fun connectCharacteristics3(gatt: BluetoothGatt) {
         val writeChar = writeCharacteristic
-        if (writeChar == null) {
-            onSerialConnectError(IOException("write characteristic is null"))
-            return
-        }
-        val writeProperties = writeChar.properties
-        if ((writeProperties and (BluetoothGattCharacteristic.PROPERTY_WRITE or
+            ?: return onSerialConnectError(IOException("write characteristic is null"))
+
+        if ((writeChar.properties and (BluetoothGattCharacteristic.PROPERTY_WRITE or
                     BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE)) == 0) {
-            onSerialConnectError(IOException("write characteristic not writable"))
-            return
+            return onSerialConnectError(IOException("write characteristic not writable"))
         }
+
         val readChar = readCharacteristic
-        if (readChar == null) {
-            onSerialConnectError(IOException("read characteristic is null"))
-            return
-        }
+            ?: return onSerialConnectError(IOException("read characteristic is null"))
+
         if (!gatt.setCharacteristicNotification(readChar, true)) {
-            onSerialConnectError(IOException("no notification for read characteristic"))
-            return
+            return onSerialConnectError(IOException("no notification for read characteristic"))
         }
+
         val readDescriptor = readChar.getDescriptor(BLUETOOTH_LE_CCCD)
-        if (readDescriptor == null) {
-            onSerialConnectError(IOException("no CCCD descriptor for read characteristic"))
-            return
-        }
+            ?: return onSerialConnectError(IOException("no CCCD descriptor for read characteristic"))
         val readProperties = readChar.properties
-        if ((readProperties and BluetoothGattCharacteristic.PROPERTY_INDICATE) != 0) {
-            Log.d(TAG, "enable read indication")
-            readDescriptor.value = BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
-        } else if ((readProperties and BluetoothGattCharacteristic.PROPERTY_NOTIFY) != 0) {
-            Log.d(TAG, "enable read notification")
-            readDescriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-        } else {
-            onSerialConnectError(IOException("no indication/notification for read characteristic ($readProperties)"))
-            return
+
+        readDescriptor.value = when {
+            (readProperties and BluetoothGattCharacteristic.PROPERTY_INDICATE) != 0 -> BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
+            (readProperties and BluetoothGattCharacteristic.PROPERTY_NOTIFY) != 0 -> BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+            else -> return onSerialConnectError(IOException("no indication/notification for read characteristic ($readProperties)"))
         }
-        Log.d(TAG, "writing read characteristic descriptor")
+
         if (!gatt.writeDescriptor(readDescriptor)) {
             onSerialConnectError(IOException("read characteristic CCCD descriptor not writable"))
         }
     }
 
-    override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
-        delegate?.onDescriptorWrite(gatt, descriptor, status)
+    override fun onDescriptorWrite(
+        gatt: BluetoothGatt,
+        descriptor: BluetoothGattDescriptor,
+        status: Int
+    ) {
         if (canceled) return
         if (descriptor.characteristic == readCharacteristic) {
-            Log.d(TAG, "writing read characteristic descriptor finished, status=$status")
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 onSerialConnectError(IOException("write descriptor failed"))
             } else {
-                onSerialConnect()
                 connected = true
-                Log.d(TAG, "connected")
+                onSerialConnect()
             }
         }
     }
@@ -296,79 +280,31 @@ internal class SerialSocket(
         data: ByteArray
     ) {
         if (canceled) return
-        delegate?.onCharacteristicChanged(gatt, characteristic)
-        if (canceled) return
         if (characteristic == readCharacteristic) {
             onSerialRead(data)
-            Log.d(TAG, "read, len=${data.size}")
         }
     }
 
-    @Throws(IOException::class)
-    internal fun write(data: ByteArray) {
-        if (canceled || !connected || writeCharacteristic == null) {
-            throw IOException("not connected")
-        }
-        val writeChar = writeCharacteristic ?: throw IOException("write characteristic is null")
-        var data0: ByteArray?
-        synchronized(writeBuffer) {
-            if (data.size <= payloadSize) {
-                data0 = data
-            } else {
-                data0 = data.copyOfRange(0, payloadSize)
-            }
-
-            val canWriteDelegate = delegate?.canWrite() ?: true
-            if (!writePending && writeBuffer.isEmpty() && canWriteDelegate) {
-                writePending = true
-            } else {
-                data0.let {
-                    writeBuffer.add(it)
-                    Log.d(TAG, "write queued, len=${it.size}")
-                }
-                data0 = null
-            }
-            if (data.size > payloadSize) {
-                for (i in 1 until (data.size + payloadSize - 1) / payloadSize) {
-                    val from = i * payloadSize
-                    val to = Math.min(from + payloadSize, data.size)
-                    writeBuffer.add(data.copyOfRange(from, to))
-                    Log.d(TAG, "write queued, len=${to - from}")
-                }
-            }
-        }
-        val dataToWrite = data0
-        if (dataToWrite != null) {
-            writeChar.value = dataToWrite
-            val activeGatt = gatt ?: throw IOException("gatt is null")
-            if (!activeGatt.writeCharacteristic(writeChar)) {
-                onSerialIoError(IOException("write failed"))
-            } else {
-                Log.d(TAG, "write started, len=${dataToWrite.size}")
-            }
-        }
-    }
-
-    override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
+    override fun onCharacteristicWrite(
+        gatt: BluetoothGatt,
+        characteristic: BluetoothGattCharacteristic,
+        status: Int
+    ) {
         if (canceled || !connected || writeCharacteristic == null) return
         if (status != BluetoothGatt.GATT_SUCCESS) {
             onSerialIoError(IOException("write failed"))
             return
         }
-        delegate?.onCharacteristicWrite(gatt, characteristic, status)
-        if (canceled) return
         if (characteristic == writeCharacteristic) {
-            Log.d(TAG, "write finished, status=$status")
             writeNext()
         }
     }
 
     private fun writeNext() {
-        val data: ByteArray?
         val writeChar = writeCharacteristic ?: return
+        val data: ByteArray?
         synchronized(writeBuffer) {
-            val canWriteDelegate = delegate?.canWrite() ?: true
-            if (writeBuffer.isNotEmpty() && canWriteDelegate) {
+            if (writeBuffer.isNotEmpty()) {
                 writePending = true
                 data = writeBuffer.removeAt(0)
             } else {
@@ -382,8 +318,6 @@ internal class SerialSocket(
             val activeGatt = gatt
             if (activeGatt == null || !activeGatt.writeCharacteristic(writeChar)) {
                 onSerialIoError(IOException("write failed"))
-            } else {
-                Log.d(TAG, "write started, len=${data.size}")
             }
         }
     }
@@ -405,202 +339,5 @@ internal class SerialSocket(
         writePending = false
         canceled = true
         listener?.onSerialIoError(e)
-    }
-
-    private inner class Cc245XDelegate : DeviceDelegate() {
-        override fun connectCharacteristics(s: BluetoothGattService): Boolean {
-            Log.d(TAG, "service cc254x uart")
-            readCharacteristic = s.getCharacteristic(BLUETOOTH_LE_CC254X_CHAR_RW)
-            writeCharacteristic = s.getCharacteristic(BLUETOOTH_LE_CC254X_CHAR_RW)
-            return true
-        }
-    }
-
-    private inner class MicrochipDelegate : DeviceDelegate() {
-        override fun connectCharacteristics(s: BluetoothGattService): Boolean {
-            Log.d(TAG, "service microchip uart")
-            readCharacteristic = s.getCharacteristic(BLUETOOTH_LE_MICROCHIP_CHAR_RW)
-            writeCharacteristic = s.getCharacteristic(BLUETOOTH_LE_MICROCHIP_CHAR_W)
-            if (writeCharacteristic == null) {
-                writeCharacteristic = s.getCharacteristic(BLUETOOTH_LE_MICROCHIP_CHAR_RW)
-            }
-            return true
-        }
-    }
-
-    private inner class NrfDelegate : DeviceDelegate() {
-        override fun connectCharacteristics(s: BluetoothGattService): Boolean {
-            Log.d(TAG, "service nrf uart")
-            val rw2 = s.getCharacteristic(BLUETOOTH_LE_NRF_CHAR_RW2)
-            val rw3 = s.getCharacteristic(BLUETOOTH_LE_NRF_CHAR_RW3)
-            if (rw2 != null && rw3 != null) {
-                val rw2prop = rw2.properties
-                val rw3prop = rw3.properties
-                val rw2write = (rw2prop and BluetoothGattCharacteristic.PROPERTY_WRITE) != 0
-                val rw3write = (rw3prop and BluetoothGattCharacteristic.PROPERTY_WRITE) != 0
-                Log.d(TAG, "characteristic properties $rw2prop/$rw3prop")
-                if (rw2write && rw3write) {
-                    onSerialConnectError(IOException("multiple write characteristics ($rw2prop/$rw3prop)"))
-                } else if (rw2write) {
-                    writeCharacteristic = rw2
-                    readCharacteristic = rw3
-                } else if (rw3write) {
-                    writeCharacteristic = rw3
-                    readCharacteristic = rw2
-                } else {
-                    onSerialConnectError(IOException("no write characteristic ($rw2prop/$rw3prop)"))
-                }
-            }
-            return true
-        }
-    }
-
-    private inner class TelitDelegate : DeviceDelegate() {
-        private var readCreditsCharacteristic: BluetoothGattCharacteristic? = null
-        private var writeCreditsCharacteristic: BluetoothGattCharacteristic? = null
-        private var readCredits = 0
-        private var writeCredits = 0
-
-        override fun connectCharacteristics(s: BluetoothGattService): Boolean {
-            Log.d(TAG, "service telit tio 2.0")
-            readCredits = 0
-            writeCredits = 0
-            readCharacteristic = s.getCharacteristic(BLUETOOTH_LE_TIO_CHAR_RX)
-            writeCharacteristic = s.getCharacteristic(BLUETOOTH_LE_TIO_CHAR_TX)
-            readCreditsCharacteristic = s.getCharacteristic(BLUETOOTH_LE_TIO_CHAR_RX_CREDITS)
-            writeCreditsCharacteristic = s.getCharacteristic(BLUETOOTH_LE_TIO_CHAR_TX_CREDITS)
-            if (readCharacteristic == null) {
-                onSerialConnectError(IOException("read characteristic not found"))
-                return false
-            }
-            if (writeCharacteristic == null) {
-                onSerialConnectError(IOException("write characteristic not found"))
-                return false
-            }
-            if (readCreditsCharacteristic == null) {
-                onSerialConnectError(IOException("read credits characteristic not found"))
-                return false
-            }
-            if (writeCreditsCharacteristic == null) {
-                onSerialConnectError(IOException("write credits characteristic not found"))
-                return false
-            }
-            val activeGatt = gatt ?: return false
-            if (!activeGatt.setCharacteristicNotification(readCreditsCharacteristic, true)) {
-                onSerialConnectError(IOException("no notification for read credits characteristic"))
-                return false
-            }
-            val readCreditsDescriptor = readCreditsCharacteristic?.getDescriptor(BLUETOOTH_LE_CCCD)
-            if (readCreditsDescriptor == null) {
-                onSerialConnectError(IOException("no CCCD descriptor for read credits characteristic"))
-                return false
-            }
-            readCreditsDescriptor.value = BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
-            Log.d(TAG, "writing read credits characteristic descriptor")
-            if (!activeGatt.writeDescriptor(readCreditsDescriptor)) {
-                onSerialConnectError(IOException("read credits characteristic CCCD descriptor not writable"))
-                return false
-            }
-            Log.d(TAG, "writing read credits characteristic descriptor")
-            return false
-        }
-
-        override fun onDescriptorWrite(g: BluetoothGatt, d: BluetoothGattDescriptor, status: Int) {
-            if (d.characteristic == readCreditsCharacteristic) {
-                Log.d(TAG, "writing read credits characteristic descriptor finished, status=$status")
-                if (status != BluetoothGatt.GATT_SUCCESS) {
-                    onSerialConnectError(IOException("write credits descriptor failed"))
-                } else {
-                    connectCharacteristics2(g)
-                }
-            }
-            if (d.characteristic == readCharacteristic) {
-                Log.d(TAG, "writing read characteristic descriptor finished, status=$status")
-                if (status == BluetoothGatt.GATT_SUCCESS) {
-                    readCharacteristic?.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-                    writeCharacteristic?.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-                    grantReadCredits()
-                }
-            }
-        }
-
-        override fun onCharacteristicChanged(g: BluetoothGatt, c: BluetoothGattCharacteristic) {
-            if (c == readCreditsCharacteristic) {
-                val value = readCreditsCharacteristic?.value
-                val newCredits = if (value != null && value.isNotEmpty()) value[0].toInt() else 0
-                synchronized(writeBuffer) {
-                    writeCredits += newCredits
-                }
-                Log.d(TAG, "got write credits +$newCredits =$writeCredits")
-
-                if (!writePending && writeBuffer.isNotEmpty()) {
-                    Log.d(TAG, "resume blocked write")
-                    writeNext()
-                }
-            }
-            if (c == readCharacteristic) {
-                grantReadCredits()
-                Log.d(TAG, "read, credits=$readCredits")
-            }
-        }
-
-        override fun onCharacteristicWrite(g: BluetoothGatt, c: BluetoothGattCharacteristic, status: Int) {
-            if (c == writeCharacteristic) {
-                synchronized(writeBuffer) {
-                    if (writeCredits > 0) {
-                        writeCredits -= 1
-                    }
-                }
-                Log.d(TAG, "write finished, credits=$writeCredits")
-            }
-            if (c == writeCreditsCharacteristic) {
-                Log.d(TAG, "write credits finished, status=$status")
-            }
-        }
-
-        override fun canWrite(): Boolean {
-            if (writeCredits > 0) return true
-            Log.d(TAG, "no write credits")
-            return false
-        }
-
-        override fun disconnect() {
-            readCreditsCharacteristic = null
-            writeCreditsCharacteristic = null
-        }
-
-        private fun grantReadCredits() {
-            val minReadCredits = 16
-            val maxReadCredits = 64
-            if (readCredits > 0) {
-                readCredits -= 1
-            }
-            if (readCredits <= minReadCredits) {
-                val newCredits = maxReadCredits - readCredits
-                readCredits += newCredits
-                val data = byteArrayOf(newCredits.toByte())
-                Log.d(TAG, "grant read credits +$newCredits =$readCredits")
-                writeCreditsCharacteristic?.value = data
-                val activeGatt = gatt
-                if (activeGatt != null && writeCreditsCharacteristic != null) {
-                    if (!activeGatt.writeCharacteristic(writeCreditsCharacteristic)) {
-                        if (connected) {
-                            onSerialIoError(IOException("write read credits failed"))
-                        } else {
-                            onSerialConnectError(IOException("write read credits failed"))
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private inner class ESP32Delegate : DeviceDelegate() {
-        override fun connectCharacteristics(s: BluetoothGattService): Boolean {
-            Log.d(TAG, "service esp32 uart")
-            readCharacteristic = s.getCharacteristic(BLUETOOTH_LE_ESP32_CHAR_RW)
-            writeCharacteristic = s.getCharacteristic(BLUETOOTH_LE_ESP32_CHAR_RW)
-            return true
-        }
     }
 }

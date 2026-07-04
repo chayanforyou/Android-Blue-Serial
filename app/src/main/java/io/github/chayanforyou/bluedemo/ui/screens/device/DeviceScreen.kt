@@ -68,21 +68,10 @@ fun DeviceScreen(
     onDeviceSelected: (device: Device) -> Unit,
 ) {
     val context = LocalContext.current
-    val bluetoothManager =
-        remember { context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager }
-    val bluetoothAdapter = remember { bluetoothManager?.adapter }
 
     // --- State & Remembered Variables ---
     var hasPermissions by remember { mutableStateOf(PermissionHelper.hasConnectPermission(context)) }
-    var isBluetoothEnabled by remember {
-        mutableStateOf(
-            try {
-                bluetoothAdapter?.isEnabled ?: true
-            } catch (_: SecurityException) {
-                false
-            }
-        )
-    }
+    var isBluetoothEnabled by remember { mutableStateOf(isBluetoothEnabled(context)) }
     var selectedTabIndex by remember { mutableIntStateOf(0) }
     var isClassicScanning by remember { mutableStateOf(false) }
     var classicScanTrigger by remember { mutableStateOf<(() -> Unit)?>(null) }
@@ -114,7 +103,7 @@ fun DeviceScreen(
     ) { isGranted ->
         hasPermissions = isGranted
         if (isGranted) {
-            if (bluetoothAdapter != null && !bluetoothAdapter.isEnabled) {
+            if (!isBluetoothEnabled) {
                 requestBluetoothEnable(bluetoothEnableLauncher)
             }
         } else {
@@ -152,7 +141,7 @@ fun DeviceScreen(
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 permissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
             }
-        } else if (bluetoothAdapter != null && !bluetoothAdapter.isEnabled) {
+        } else if (!isBluetoothEnabled) {
             requestBluetoothEnable(bluetoothEnableLauncher)
         }
     }
@@ -243,7 +232,7 @@ fun DeviceScreen(
                         }
                     }
                 )
-            } else if (bluetoothAdapter != null && !isBluetoothEnabled) {
+            } else if (!isBluetoothEnabled) {
                 PlaceholderContent(
                     text = "Bluetooth is disabled",
                     buttonText = "Enable Bluetooth",
@@ -329,11 +318,21 @@ fun DeviceRow(
     }
 }
 
+private fun isBluetoothEnabled(context: Context): Boolean {
+    try {
+        val bluetoothManager =
+            context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+        return bluetoothManager?.adapter?.isEnabled ?: true
+    } catch (_: Exception) {
+        return false
+    }
+}
+
 private fun requestBluetoothEnable(launcher: ActivityResultLauncher<Intent>) {
     try {
         val enableBtIntent = Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)
         launcher.launch(enableBtIntent)
-    } catch (_: SecurityException) {
+    } catch (_: Exception) {
         // Safe catch
     }
 }

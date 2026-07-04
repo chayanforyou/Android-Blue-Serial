@@ -10,7 +10,7 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.util.UUID
 
-open class BluetoothConnectionClassic(
+class BluetoothConnectionClassic(
     private val context: Context,
     onReadCallback: OnReadCallback,
     onDisconnectedCallback: OnDisconnectedCallback,
