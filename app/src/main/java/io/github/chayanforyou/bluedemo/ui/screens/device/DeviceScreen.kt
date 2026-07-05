@@ -6,9 +6,13 @@ import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothManager
 import android.content.Context
 import android.content.Intent
+import android.content.IntentSender
+import android.location.LocationManager
 import android.os.Build
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -46,6 +50,15 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.google.android.gms.common.api.ResolvableApiException
+import com.google.android.gms.location.LocationRequest
+import com.google.android.gms.location.LocationRequest.Builder.IMPLICIT_MIN_UPDATE_INTERVAL
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.LocationSettingsRequest
+import com.google.android.gms.location.LocationSettingsResponse
+import com.google.android.gms.location.Priority
+import com.google.android.gms.location.SettingsClient
+import com.google.android.gms.tasks.Task
 import io.github.chayanforyou.bluedemo.data.Device
 import io.github.chayanforyou.bluedemo.utils.PermissionHelper
 
@@ -55,102 +68,10 @@ fun DeviceScreen(
     onDeviceSelected: (device: Device) -> Unit,
 ) {
     val context = LocalContext.current
-    val bluetoothManager =
-        remember { context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager }
-    val bluetoothAdapter = remember { bluetoothManager?.adapter }
 
-    var hasPermissions by remember { mutableStateOf(PermissionHelper.hasBluetoothPermissions(context)) }
-    var isBluetoothEnabled by remember {
-        mutableStateOf(
-            if (bluetoothAdapter == null) {
-                true
-            } else {
-                try {
-                    bluetoothAdapter.isEnabled
-                } catch (e: SecurityException) {
-                    false
-                }
-            }
-        )
-    }
-
-    val bluetoothEnableLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        if (result.resultCode == Activity.RESULT_OK) {
-            isBluetoothEnabled = true
-        } else {
-            isBluetoothEnabled = false
-            Toast.makeText(context, "Bluetooth is required to scan", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    val permissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) { permissions ->
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            val scanGranted = permissions[Manifest.permission.BLUETOOTH_SCAN] ?: false
-            val connectGranted = permissions[Manifest.permission.BLUETOOTH_CONNECT] ?: false
-            hasPermissions = scanGranted && connectGranted
-            if (hasPermissions) {
-                if (bluetoothAdapter != null) {
-                    isBluetoothEnabled = bluetoothAdapter.isEnabled
-                    if (!isBluetoothEnabled) {
-                        try {
-                            val enableBtIntent = Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)
-                            bluetoothEnableLauncher.launch(enableBtIntent)
-                        } catch (e: SecurityException) {
-                            // Safe catch
-                        }
-                    }
-                }
-            } else {
-                Toast.makeText(context, "Bluetooth permissions are required", Toast.LENGTH_SHORT)
-                    .show()
-            }
-        }
-    }
-
-    val launchPermissionRequest = {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            permissionLauncher.launch(
-                arrayOf(
-                    Manifest.permission.BLUETOOTH_SCAN,
-                    Manifest.permission.BLUETOOTH_CONNECT
-                )
-            )
-        }
-    }
-
-    val launchBluetoothEnable = {
-        try {
-            val enableBtIntent = Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)
-            bluetoothEnableLauncher.launch(enableBtIntent)
-        } catch (e: SecurityException) {
-            launchPermissionRequest()
-        }
-    }
-
-    LaunchedEffect(Unit) {
-        if (bluetoothAdapter != null && !bluetoothAdapter.isEnabled) {
-            launchBluetoothEnable()
-        } else if (!hasPermissions) {
-            launchPermissionRequest()
-        }
-    }
-
-    LaunchedEffect(hasPermissions) {
-        if (hasPermissions && bluetoothAdapter != null) {
-            isBluetoothEnabled = bluetoothAdapter.isEnabled
-        }
-    }
-
-    LaunchedEffect(isBluetoothEnabled) {
-        if (isBluetoothEnabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !hasPermissions) {
-            launchPermissionRequest()
-        }
-    }
-
+    // --- State & Remembered Variables ---
+    var hasPermissions by remember { mutableStateOf(PermissionHelper.hasConnectPermission(context)) }
+    var isBluetoothEnabled by remember { mutableStateOf(isBluetoothEnabled(context)) }
     var selectedTabIndex by remember { mutableIntStateOf(0) }
     var isClassicScanning by remember { mutableStateOf(false) }
     var classicScanTrigger by remember { mutableStateOf<(() -> Unit)?>(null) }
@@ -163,6 +84,66 @@ fun DeviceScreen(
     val titleText = when {
         isClassicScanning || isLeScanning -> "Scanning..."
         else -> "Devices"
+    }
+
+    // --- Activity Result Launchers ---
+    val bluetoothEnableLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            isBluetoothEnabled = true
+        } else {
+            isBluetoothEnabled = false
+            Toast.makeText(context, "Bluetooth is required to scan", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        hasPermissions = isGranted
+        if (isGranted) {
+            if (!isBluetoothEnabled) {
+                requestBluetoothEnable(bluetoothEnableLauncher)
+            }
+        } else {
+            Toast.makeText(context, "Bluetooth permission is required", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    val resolutionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            scanTrigger?.invoke()
+        }
+    }
+
+    val scanPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { _ ->
+        val scanPermissionsGranted = PermissionHelper.hasScanPermissions(context)
+        if (scanPermissionsGranted) {
+            checkGpsAndScan(context, resolutionLauncher) {
+                scanTrigger?.invoke()
+            }
+        } else {
+            Toast.makeText(
+                context,
+                "Scanning requires location and scan permissions",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        if (!hasPermissions) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                permissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
+            }
+        } else if (!isBluetoothEnabled) {
+            requestBluetoothEnable(bluetoothEnableLauncher)
+        }
     }
 
     Scaffold(
@@ -178,7 +159,15 @@ fun DeviceScreen(
                     },
                     actions = {
                         TextButton(
-                            onClick = { scanTrigger?.invoke() },
+                            onClick = {
+                                if (!PermissionHelper.hasScanPermissions(context)) {
+                                    scanPermissionLauncher.launch(PermissionHelper.getScanPermissions())
+                                } else {
+                                    checkGpsAndScan(context, resolutionLauncher) {
+                                        scanTrigger?.invoke()
+                                    }
+                                }
+                            },
                             enabled = !isScanning,
                             colors = ButtonDefaults.textButtonColors(
                                 contentColor = MaterialTheme.colorScheme.onPrimary,
@@ -233,17 +222,21 @@ fun DeviceScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
-            if (bluetoothAdapter != null && !isBluetoothEnabled) {
-                PlaceholderContent(
-                    text = "Bluetooth is disabled",
-                    buttonText = "Enable Bluetooth",
-                    onButtonClick = launchBluetoothEnable
-                )
-            } else if (!hasPermissions) {
+            if (!hasPermissions) {
                 PlaceholderContent(
                     text = "Bluetooth permission is missing",
                     buttonText = "Allow Permission",
-                    onButtonClick = launchPermissionRequest
+                    onButtonClick = {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                            permissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
+                        }
+                    }
+                )
+            } else if (!isBluetoothEnabled) {
+                PlaceholderContent(
+                    text = "Bluetooth is disabled",
+                    buttonText = "Enable Bluetooth",
+                    onButtonClick = { requestBluetoothEnable(bluetoothEnableLauncher) }
                 )
             } else {
                 when (selectedTabIndex) {
@@ -316,12 +309,75 @@ fun DeviceRow(
                 fontSize = 16.sp,
                 fontWeight = FontWeight.Medium
             )
-            Spacer(modifier = Modifier.height(4.dp))
             Text(
                 text = device.address,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 13.sp
             )
+        }
+    }
+}
+
+private fun isBluetoothEnabled(context: Context): Boolean {
+    try {
+        val bluetoothManager =
+            context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+        return bluetoothManager?.adapter?.isEnabled ?: true
+    } catch (_: Exception) {
+        return false
+    }
+}
+
+private fun requestBluetoothEnable(launcher: ActivityResultLauncher<Intent>) {
+    try {
+        val enableBtIntent = Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)
+        launcher.launch(enableBtIntent)
+    } catch (_: Exception) {
+        // Safe catch
+    }
+}
+
+private fun checkGpsAndScan(
+    context: Context,
+    resolutionLauncher: ActivityResultLauncher<IntentSenderRequest>,
+    onGpsEnabled: () -> Unit
+) {
+    val locationManager =
+        context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+
+    if (!locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+        turnOnGPS(context, resolutionLauncher) {
+            onGpsEnabled()
+        }
+    } else {
+        onGpsEnabled()
+    }
+}
+
+private fun turnOnGPS(
+    context: Context,
+    resolutionLauncher: ActivityResultLauncher<IntentSenderRequest>,
+    onGpsEnabled: () -> Unit
+) {
+    val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 10000).apply {
+        setWaitForAccurateLocation(false)
+        setMinUpdateIntervalMillis(IMPLICIT_MIN_UPDATE_INTERVAL)
+        setMaxUpdateDelayMillis(100000)
+    }.build()
+
+    val builder = LocationSettingsRequest.Builder().addLocationRequest(request)
+    val client: SettingsClient = LocationServices.getSettingsClient(context)
+    val task: Task<LocationSettingsResponse> = client.checkLocationSettings(builder.build())
+    task.addOnSuccessListener {
+        onGpsEnabled()
+    }
+    task.addOnFailureListener { exception ->
+        if (exception is ResolvableApiException) {
+            try {
+                val intentSenderRequest = IntentSenderRequest.Builder(exception.resolution).build()
+                resolutionLauncher.launch(intentSenderRequest)
+            } catch (_: IntentSender.SendIntentException) {
+            }
         }
     }
 }

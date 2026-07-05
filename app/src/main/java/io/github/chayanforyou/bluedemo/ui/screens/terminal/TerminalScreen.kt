@@ -1,7 +1,5 @@
 package io.github.chayanforyou.bluedemo.ui.screens.terminal
 
-import android.bluetooth.BluetoothManager
-import android.content.Context
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -10,9 +8,12 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -20,6 +21,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Send
@@ -51,8 +54,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.chayanforyou.bluedemo.data.Device
@@ -110,9 +113,6 @@ fun TerminalScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    val bluetoothManager = remember { context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager }
-    val bluetoothAdapter = remember { bluetoothManager?.adapter }
-
     val logs = remember { mutableStateListOf<LogEntry>() }
     var isConnected by remember { mutableStateOf(false) }
     var isConnecting by remember { mutableStateOf(false) }
@@ -141,17 +141,15 @@ fun TerminalScreen(
     // Bluetooth connection instance
     val connection = remember {
         if (device.type == DeviceType.LE) {
-            BluetoothConnectionLE(readCallback, disconnectedCallback, context.applicationContext)
+            BluetoothConnectionLE(context, readCallback, disconnectedCallback)
         } else {
-            BluetoothConnectionClassic(readCallback, disconnectedCallback, bluetoothAdapter)
+            BluetoothConnectionClassic(context, readCallback, disconnectedCallback)
         }
     }
 
     // Connect function
     val connectDevice = {
-        if (bluetoothAdapter == null) {
-            Toast.makeText(context, "Bluetooth not supported", Toast.LENGTH_SHORT).show()
-        } else if (!isConnecting && !isConnected) {
+        if (!isConnecting && !isConnected) {
             isConnecting = true
             logs.add(LogEntry("Connecting to ${device.name}..."))
             scope.launch(Dispatchers.IO) {
@@ -163,9 +161,9 @@ fun TerminalScreen(
                         isConnecting = false
                     }
                 } catch (e: Exception) {
+                    val message = e.cause?.message ?: e.message ?: ""
                     withContext(Dispatchers.Main) {
-                        logs.add(LogEntry("Connection failed"))
-                        Toast.makeText(context, "Connect error", Toast.LENGTH_SHORT).show()
+                        logs.add(LogEntry("Connection failed: $message"))
                         isConnected = false
                         isConnecting = false
                     }
@@ -186,23 +184,22 @@ fun TerminalScreen(
 
     // Send function
     val sendData = { text: String ->
-        if (text.isNotEmpty()) {
-            if (isConnected) {
-                scope.launch(Dispatchers.IO) {
-                    try {
-                        connection.write(text.toByteArray())
-                        withContext(Dispatchers.Main) {
-                            logs.add(LogEntry(text, type = LogType.Outgoing))
-                        }
-                    } catch (e: Exception) {
-                        withContext(Dispatchers.Main) {
-                            Toast.makeText(context, "Send error", Toast.LENGTH_SHORT).show()
-                        }
+        if (isConnected) {
+            scope.launch(Dispatchers.IO) {
+                try {
+                    connection.write(text.toByteArray())
+                    withContext(Dispatchers.Main) {
+                        logs.add(LogEntry(text, type = LogType.Outgoing))
+                    }
+                } catch (e: Exception) {
+                    val message = e.cause?.message ?: e.message ?: ""
+                    withContext(Dispatchers.Main) {
+                        logs.add(LogEntry("Send error: $message"))
                     }
                 }
-            } else {
-                Toast.makeText(context, "Not connected", Toast.LENGTH_SHORT).show()
             }
+        } else {
+            Toast.makeText(context, "Serial device not connected", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -226,6 +223,7 @@ fun TerminalScreen(
     }
 
     Scaffold(
+        contentWindowInsets = WindowInsets.safeDrawing,
         topBar = {
             TopAppBar(
                 title = {
@@ -298,21 +296,19 @@ fun TerminalScreen(
                         }
 
                         Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 2.dp)
+                            modifier = Modifier.fillMaxWidth()
                         ) {
                             Text(
                                 text = "${log.timestamp} ",
                                 color = ConsoleTimestamp,
                                 fontSize = 14.sp,
-                                fontFamily = FontFamily.Monospace
+                                lineHeight = 14.sp,
                             )
                             Text(
                                 text = log.text,
                                 color = textColor,
                                 fontSize = 14.sp,
-                                fontFamily = FontFamily.Monospace
+                                lineHeight = 14.sp,
                             )
                         }
                     }
@@ -331,6 +327,11 @@ fun TerminalScreen(
                 BasicTextField(
                     value = inputText,
                     onValueChange = { inputText = it },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                    keyboardActions = KeyboardActions(
+                        onSend = { sendData(inputText) }
+                    ),
                     textStyle = TextStyle(
                         color = MaterialTheme.colorScheme.onSurface,
                         fontSize = 16.sp
@@ -338,9 +339,8 @@ fun TerminalScreen(
                     cursorBrush = SolidColor(MaterialTheme.colorScheme.onSurface),
                     modifier = Modifier
                         .weight(1f)
-                        .padding(horizontal = 8.dp)
-                        .drawBehindBottomBorder(Color.Gray)
-                        .padding(bottom = 8.dp),
+                        .heightIn(min = 36.dp)
+                        .drawBehindBottomBorder(Color.Gray),
                     decorationBox = { innerTextField ->
                         if (inputText.isEmpty()) {
                             Text(
@@ -359,14 +359,9 @@ fun TerminalScreen(
                 Box(
                     contentAlignment = Alignment.Center,
                     modifier = Modifier
-                        .size(46.dp)
+                        .size(50.dp, 40.dp)
                         .background(ConsoleButtonBg, shape = RoundedCornerShape(4.dp))
-                        .clickable {
-                            if (inputText.isNotEmpty()) {
-                                sendData(inputText)
-                                inputText = ""
-                            }
-                        }
+                        .clickable { sendData(inputText) }
                 ) {
                     Icon(
                         imageVector = Icons.AutoMirrored.Rounded.Send,
