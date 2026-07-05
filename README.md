@@ -26,14 +26,13 @@ A lightweight, coroutine-powered Android library designed to simplify serial com
 ## Installation
 
 ### 1. Add Repository
-Add jitpack to your `settings.gradle.kts` (or `build.gradle` for older versions):
+Add `mavenCentral` to your `settings.gradle.kts` (or `build.gradle` for older versions):
 
 ```kotlin
 dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
-        maven { url = uri("https://jitpack.io") }
     }
 }
 ```
@@ -43,15 +42,7 @@ Add the library dependency to your module's `build.gradle.kts`:
 
 ```kotlin
 dependencies {
-    implementation("com.github.chayanforyou:android-blue-serial:1.0.0")
-}
-```
-
-Or, if integrating locally inside this multi-module project:
-
-```kotlin
-dependencies {
-    implementation(project(":blue-serial"))
+    implementation("io.github.chayanforyou:blue-serial:1.0.0")
 }
 ```
 
