@@ -1,4 +1,7 @@
-# Android-Blue-Serial
+# Android Blue Serial
+[![Maven Central](https://img.shields.io/maven-central/v/io.github.chayanforyou/blue-serial)](https://central.sonatype.com/artifact/io.github.chayanforyou/blue-serial)
+[![license](https://img.shields.io/badge/license-MIT-brightgreen.svg)](https://opensource.org/licenses/MIT)
+
 
 A lightweight, coroutine-powered Android library designed to simplify serial communication over Bluetooth. It supports both **Bluetooth Classic (RFCOMM)** and **Bluetooth Low Energy (LE)** connections using a unified, clean API.
 
